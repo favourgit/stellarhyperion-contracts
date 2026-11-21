@@ -67,14 +67,18 @@ function tokenKey(network: unknown, id: unknown): string | null {
   const parsed = tryParseStellarAddress(id);
   return parsed.ok && id.startsWith("C") ? id : null;
 }
-function identity(
-  network: string,
-  id: string,
-  representation: SnapshotRepresentation | undefined,
-): string | null {
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+function identity(network: unknown, id: unknown, value: unknown): string | null {
+  const representation = record(value);
   if (
-    representation === undefined ||
+    typeof network !== "string" ||
+    typeof id !== "string" ||
     representation === null ||
+    typeof representation.destinationNetwork !== "string" ||
     !decimals(representation.tokenDecimals) ||
     !decimals(representation.destinationDecimals)
   )
@@ -107,28 +111,36 @@ function identity(
     representation.destinationDecimals,
   ]);
 }
-function validSnapshot(value: RouterSnapshot): boolean {
+function validSnapshot(value: unknown): value is RouterSnapshot {
+  const state = record(value);
   if (
-    value === null ||
-    typeof value !== "object" ||
-    typeof value.paused !== "boolean" ||
-    typeof value.tokenRegistered !== "boolean" ||
-    typeof value.tokenEnabled !== "boolean" ||
-    !decimals(value.tokenDecimals) ||
-    !Number.isSafeInteger(value.feeBps) ||
-    value.feeBps < 0 ||
-    value.feeBps > MAX_FEE_BPS
+    state === null ||
+    typeof state.paused !== "boolean" ||
+    typeof state.tokenRegistered !== "boolean" ||
+    typeof state.tokenEnabled !== "boolean" ||
+    !decimals(state.tokenDecimals) ||
+    typeof state.feeBps !== "number" ||
+    !Number.isSafeInteger(state.feeBps) ||
+    state.feeBps < 0 ||
+    state.feeBps > MAX_FEE_BPS
   )
     return false;
-  const flags = [value.routeEnabled, value.adapterSet, value.chainSupported];
-  if (flags.some((map) => map === null || typeof map !== "object")) return false;
-  if (value.flowAvailable === null || typeof value.flowAvailable !== "object") return false;
-  return ROUTE_KINDS.every(
-    (route) =>
-      flags.every((map) => map[route] === undefined || typeof map[route] === "boolean") &&
-      (value.flowAvailable[route] === undefined ||
-        (typeof value.flowAvailable[route] === "bigint" && value.flowAvailable[route]! >= 0n)),
-  );
+  const flags = [
+    record(state.routeEnabled),
+    record(state.adapterSet),
+    record(state.chainSupported),
+  ];
+  const flow = record(state.flowAvailable);
+  if (flow === null || flags.some((map) => map === null)) return false;
+  return ROUTE_KINDS.every((route) => {
+    const available = flow[route];
+    return (
+      flags.every(
+        (map) => map !== null && (map[route] === undefined || typeof map[route] === "boolean"),
+      ) &&
+      (available === undefined || (typeof available === "bigint" && available >= 0n))
+    );
+  });
 }
 
 /** Oldest snapshot first, then ID; winners use bestQuote over fixed enum order, never input order. */
@@ -150,12 +162,14 @@ export function compareSnapshots(
     throw new TypeError("invalid snapshot quote request");
   }
   const expected = identity(reference.network, reference.tokenId, reference.representation);
+  // Untrusted network observations are checked as unknown before entering the typed planner.
+  const entries = snapshots.map((value) => record(value));
   const counts = new Map<string, number>();
-  for (const entry of snapshots) {
-    if (entry !== null && typeof entry === "object" && typeof entry.id === "string")
+  for (const entry of entries) {
+    if (entry !== null && typeof entry.id === "string")
       counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
   }
-  const ordered = [...snapshots].sort((a, b) => {
+  const ordered = [...entries].sort((a, b) => {
     const at = timestamp(a?.takenAt) ? a.takenAt : Number.MAX_SAFE_INTEGER;
     const bt = timestamp(b?.takenAt) ? b.takenAt : Number.MAX_SAFE_INTEGER;
     const ai = typeof a?.id === "string" ? a.id : "";
@@ -172,17 +186,23 @@ export function compareSnapshots(
       reason,
       planningOnly: true,
     });
-    if (snapshotId.trim() === "" || counts.get(snapshotId) !== 1 || !timestamp(entry?.takenAt)) {
+    if (
+      entry === null ||
+      snapshotId.trim() === "" ||
+      counts.get(snapshotId) !== 1 ||
+      !timestamp(entry.takenAt)
+    ) {
       return unavailable(SnapshotStatus.Invalid, "invalid timestamp, ID or duplicate ID");
     }
     if (entry.takenAt > reference.now)
       return unavailable(SnapshotStatus.Future, "observation is in the future");
     const actual = identity(entry.network, entry.tokenId, entry.representation);
+    const representation = record(entry.representation);
     if (
       expected === null ||
       actual === null ||
       actual !== expected ||
-      request.destinationDecimals !== entry.representation?.destinationDecimals
+      request.destinationDecimals !== representation?.destinationDecimals
     ) {
       return unavailable(
         SnapshotStatus.Incompatible,
@@ -191,7 +211,7 @@ export function compareSnapshots(
     }
     if (!validSnapshot(entry.snapshot))
       return unavailable(SnapshotStatus.Invalid, "malformed router state");
-    if (entry.snapshot.tokenDecimals !== entry.representation?.tokenDecimals) {
+    if (entry.snapshot.tokenDecimals !== representation.tokenDecimals) {
       return unavailable(
         SnapshotStatus.Incompatible,
         "snapshot token precision differs from its representation",

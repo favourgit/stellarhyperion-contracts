@@ -315,9 +315,12 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
   const raw = asRecord(value, "$");
   const schemaVersion = asInteger(raw.schemaVersion, "$.schemaVersion", 1);
   if (schemaVersion !== DEPLOYMENT_SCHEMA_VERSION) {
-    fail("$.schemaVersion", `unsupported schema version ${String(schemaVersion)}`);
+    fail(
+      "$.schemaVersion",
+      `expected ${String(DEPLOYMENT_SCHEMA_VERSION)}, found ${String(schemaVersion)}`,
+    );
   }
-  const generatedAt = asTimestamp(raw.generatedAt, "$.generatedAt");
+
   const networksRaw = asRecord(raw.networks, "$.networks");
   const networks: Partial<Record<ChainKey, Deployment>> = {};
   for (const [key, entry] of Object.entries(networksRaw)) {
@@ -330,10 +333,15 @@ export function parseDeploymentSet(value: unknown): DeploymentSet {
     } else if (family === "stellar") {
       networks[key] = readStellarDeployment(record, key, path);
     } else {
-      fail(`${path}.family`, `unknown family "${family}"`);
+      fail(`${path}.family`, `expected "evm" or "stellar", found "${family}"`);
     }
   }
-  return { schemaVersion, generatedAt, networks };
+
+  return {
+    schemaVersion,
+    generatedAt: asTimestamp(raw.generatedAt, "$.generatedAt"),
+    networks,
+  };
 }
 
 export function isEvmDeployment(deployment: Deployment): deployment is EvmDeployment {
